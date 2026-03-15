@@ -160,6 +160,48 @@ function Receive-CippHttpTrigger {
     return
 }
 
+function Receive-CippQueueTrigger {
+    <#
+    .SYNOPSIS
+        Execute a queue trigger function
+    .DESCRIPTION
+        Execute a queue trigger function from an Azure Function App.
+    .PARAMETER QueueItem
+        The item from the queue that triggered the function
+    .PARAMETER TriggerMetadata
+        Metadata about the trigger, such as function name and other context
+    .FUNCTIONALITY
+        Entrypoint for the queue trigger function
+    #>
+    param($QueueItem, $TriggerMetadata)
+
+    Write-Information '####### Starting CIPP Queue Trigger'
+    $QueueItem = $QueueItem | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    Set-Location (Get-Item $PSScriptRoot).Parent.Parent.FullName
+
+    if (Get-Command -Name $QueueItem.Cmdlet -Module CIPPCore -ErrorAction SilentlyContinue) {
+        Write-Information "Executing command: $($QueueItem.Cmdlet) with parameters: $($QueueItem.Parameters | ConvertTo-Json -Depth 10 -Compress)"
+    } else {
+        Write-Warning "Command not found: $($QueueItem.Cmdlet). Skipping execution."
+        return
+    }
+
+    $Cmdlet = $QueueItem.Cmdlet
+    $Parameters = $QueueItem.Parameters
+    if ($Parameters) {
+        $Parameters = $Parameters | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable
+    } else {
+        $Parameters = @{}
+    }
+
+    try {
+        & $Cmdlet @Parameters
+    } catch {
+        $ErrorMsg = $_.Exception.Message
+        Write-Warning "Error in $($Cmdlet): $($ErrorMsg)"
+    }
+}
+
 function Receive-CippOrchestrationTrigger {
     <#
     .SYNOPSIS
@@ -213,11 +255,20 @@ function Receive-CippOrchestrationTrigger {
         Write-Information "Durable Mode: $DurableMode"
 
         $RetryOptions = New-DurableRetryOptions @DurableRetryOptions
-        if (!$OrchestratorInput.Batch -or ($OrchestratorInput.Batch | Measure-Object).Count -eq 0) {
+
+        $HasBatch = $OrchestratorInput.Batch -and @($OrchestratorInput.Batch).Count -gt 0
+        $HasQueueFunction = $null -ne $OrchestratorInput.QueueFunction -and $OrchestratorInput.QueueFunction -ne ''
+
+        if ($HasBatch) {
+            $Batch = $OrchestratorInput.Batch | Where-Object { $null -ne $_.FunctionName }
+        } elseif ($HasQueueFunction) {
             $Batch = (Invoke-ActivityFunction -FunctionName 'CIPPActivityFunction' -Input $OrchestratorInput.QueueFunction -ErrorAction Stop) | Where-Object { $null -ne $_.FunctionName }
         } else {
-            $Batch = $OrchestratorInput.Batch | Where-Object { $null -ne $_.FunctionName }
+            Write-Information 'No batch or queue function provided to orchestrator input'
+            $Batch = @()
         }
+
+        $Batch = @($Batch | Where-Object { $null -ne $_.FunctionName })
 
         if (($Batch | Measure-Object).Count -gt 0) {
             Write-Information "Batch Count: $($Batch.Count)"
@@ -256,6 +307,9 @@ function Receive-CippOrchestrationTrigger {
             } else {
                 $Results = $Output
             }
+        } else {
+            Write-Information 'No activities to execute in batch'
+            $Results = @()
         }
 
         if ($Results -and $OrchestratorInput.PostExecution) {
@@ -519,5 +573,6 @@ function Receive-CIPPTimerTrigger {
     return $true
 }
 
-Export-ModuleMember -Function @('Receive-CippHttpTrigger', 'Receive-CippOrchestrationTrigger', 'Receive-CippActivityTrigger', 'Receive-CIPPTimerTrigger')
+Export-ModuleMember -Function @('Receive-CippHttpTrigger', 'Receive-CippQueueTrigger', 'Receive-CippOrchestrationTrigger', 'Receive-CippActivityTrigger', 'Receive-CIPPTimerTrigger')
+
 
